@@ -13,9 +13,7 @@ COLLECTIONS = [
 ]
 
 PROXY_SERVERS = [
-    "http://user293004:q51mjk@146.19.152.241:2132",
-    "http://user293004:q51mjk@102.165.59.5:8384",
-    "http://user293004:q51mjk@166.1.58.93:1189"
+    
 ]
 
 proxy_stats = {}
@@ -24,8 +22,8 @@ proxy_counter = 0
 
 # Функция для отправки сообщений в Telegram
 async def send_telegram_message(message: str):
-    bot_token = "7595779508:AAFsAXPoE1KGYu1I08jcqdziNMK7CY1g1fE"
-    chat_id = "600429517"
+    bot_token = ""
+    chat_id = ""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     params = {
         "chat_id": chat_id,
