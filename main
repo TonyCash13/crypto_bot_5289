@@ -1,0 +1,320 @@
+import aiohttp
+import asyncio
+from datetime import datetime
+from playwright.async_api import async_playwright
+
+COLLECTIONS = [
+    "berrybox", "bunnymuffin", "crystalball", "diamondring", "easteregg",
+    "electricskull", "eternalcandle", "evileye", "flyingbroom", "genielamp",
+    "gingercookie", "hangingstar", "hexpot", "jellybunny", "jesterhat",
+    "lovecandle", "madpumpkin", "magicpotion", "partysparkler", "recordplayer",
+    "sakuraflower", "skullflower", "snowglobe", "snowmittens", "spicedwine",
+    "spyagaric", "starnotepad", "tamagadget", "trappedheart", "winterwreath", "witchhat"
+]
+
+PROXY_SERVERS = [
+    "http://user293004:q51mjk@146.19.152.241:2132",
+    "http://user293004:q51mjk@102.165.59.5:8384",
+    "http://user293004:q51mjk@166.1.58.93:1189"
+]
+
+proxy_stats = {}
+proxy_counter = 0
+
+
+# Функция для отправки сообщений в Telegram
+async def send_telegram_message(message: str):
+    bot_token = "7595779508:AAFsAXPoE1KGYu1I08jcqdziNMK7CY1g1fE"
+    chat_id = "600429517"
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    params = {
+        "chat_id": chat_id,
+        "text": message
+    }
+
+    conn = aiohttp.TCPConnector(ssl=False)
+    async with aiohttp.ClientSession(connector=conn) as session:
+        async with session.get(url, params=params) as response:
+            if response.status == 200:
+                print("✅ Сообщение отправлено в Telegram")
+            else:
+                print(f"❌ Ошибка отправки сообщения в Telegram: {response.status}")
+
+
+proxy_stats = {}
+proxy_counter = 0
+
+
+def parse_proxy_url(proxy_url: str) -> dict:
+    if not proxy_url.startswith("http://"):
+        raise ValueError("Proxy URL должен начинаться с http://")
+    no_http = proxy_url[len("http://"):]
+    auth_part, address_part = no_http.split("@")
+    username, password = auth_part.split(":")
+    return {
+        "server": f"http://{address_part}",
+        "username": username,
+        "password": password
+    }
+
+
+def get_next_proxy():
+    global proxy_counter
+    if not PROXY_SERVERS:
+        return None
+    proxy = PROXY_SERVERS[proxy_counter % len(PROXY_SERVERS)]
+    proxy_counter += 1
+    return proxy
+
+
+async def parse_collection(page, collection, session):
+    url = f"https://fragment.com/gifts/{collection}?attr%5BBackdrop%5D=%5B%22Black%22%5D"
+    print(f"\n🔍 Проверяем коллекцию: {collection}...")
+
+    try:
+        retry_count = 0
+        while retry_count < 3:
+            try:
+                await page.goto(url, timeout=30000, wait_until="networkidle")
+                print(f"✅ Загружен URL: {page.url}")
+                break
+            except Exception as e:
+                retry_count += 1
+                print(f"❌ Попытка {retry_count} для {collection} не удалась: {str(e)}")
+                if retry_count == 3:
+                    raise
+                await asyncio.sleep(1)
+
+        try:
+            await page.wait_for_selector("a.tm-grid-item", timeout=30000)
+        except Exception as e:
+            print(f"⚠️ Селектор 'a.tm-grid-item' не найден. Страница:")
+            print(await page.content())
+            return []
+
+        await page.evaluate("""
+            async () => {
+                await new Promise((resolve) => {
+                    let scrollPosition = 0;
+                    const scrollStep = 500;
+                    const scrollInterval = setInterval(() => {
+                        window.scrollBy(0, scrollStep);
+                        scrollPosition += scrollStep;
+                        if (scrollPosition >= document.body.scrollHeight) {
+                            clearInterval(scrollInterval);
+                            setTimeout(resolve, 500);
+                        }
+                    }, 150);
+                });
+            }
+        """)
+
+        items = await page.query_selector_all("a.tm-grid-item")
+        print(f"✅ Найдено карточек в {collection}: {len(items)}")
+
+        collection_gifts = []
+        item_processing_tasks = []
+
+        for item in items:
+            task = asyncio.create_task(process_item(item, collection))
+            item_processing_tasks.append(task)
+
+            if len(item_processing_tasks) >= 20:
+                done, pending = await asyncio.wait(
+                    item_processing_tasks,
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                item_processing_tasks = list(pending)
+                for task in done:
+                    result = await task
+                    if result:
+                        collection_gifts.append(result)
+
+        if item_processing_tasks:
+            results = await asyncio.gather(*item_processing_tasks)
+            collection_gifts.extend([r for r in results if r])
+
+        return collection_gifts
+
+    except Exception as e:
+        print(f"🚨 Ошибка при обработке коллекции {collection}: {str(e)}")
+        return []
+
+
+async def process_item(item, collection):
+    try:
+        status = await item.query_selector("div.tm-grid-item-status")
+        if not status or "For sale" not in await status.inner_text():
+            return None
+
+        price_element = await item.query_selector("div.tm-grid-item-value.tm-value.icon-before.icon-ton")
+        if not price_element:
+            return None
+
+        price_text = (await price_element.inner_text()).replace(",", "").replace(" ", "")
+        try:
+            price = float(price_text)
+        except ValueError:
+            return None
+
+        if price >= 17:
+            return None
+
+        link = await item.get_attribute("href")
+        if not link.startswith("http"):
+            link = f"https://fragment.com{link}"
+
+        name_element = await item.query_selector(".item-name")
+        name = (await name_element.inner_text()).strip() if name_element else collection.capitalize()
+
+        num_element = await item.query_selector(".item-num")
+        if num_element:
+            num = (await num_element.inner_text()).strip().replace("#", "")
+            full_name = f"{name} #{num}"
+        else:
+            full_name = name
+
+        print(f"🎁 Найден: {full_name} за {price} TON")
+
+        return {
+            "name": full_name,
+            "price": f"{price:.2f} TON",
+            "link": link,
+            "collection": collection
+        }
+
+    except Exception as e:
+        print(f"⚠️ Ошибка обработки карточки в {collection}: {str(e)}")
+        return None
+
+
+async def worker(browser, collection, session, results):
+    proxy_url = get_next_proxy()
+    proxy_config = None
+
+    if proxy_url:
+        try:
+            proxy_config = parse_proxy_url(proxy_url)
+            print(f"🧑‍💻 Используем прокси: {proxy_config['server']} с авторизацией")
+        except Exception as e:
+            print(f"❌ Ошибка при разборе прокси: {e}")
+            return
+
+        if proxy_url not in proxy_stats:
+            proxy_stats[proxy_url] = {"success": 0, "errors": 0}
+    else:
+        print(f"🧑‍💻 Используем без прокси")
+
+    context = await browser.new_context(
+        proxy=proxy_config,
+        viewport={"width": 1920, "height": 1080},
+        java_script_enabled=True,
+        ignore_https_errors=True,
+        bypass_csp=True,
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+    )
+
+    context.set_default_timeout(15000)
+    page = await context.new_page()
+
+    try:
+        await page.route("**/*.{png,jpg,jpeg,webp,gif,svg,css,woff2}", lambda route: route.abort())
+
+        gifts = await parse_collection(page, collection, session)
+        results.extend(gifts)
+        if proxy_url:
+            proxy_stats[proxy_url]["success"] += 1
+    except Exception as e:
+        print(f"❌ Ошибка в worker для {collection}: {str(e)}")
+        if proxy_url:
+            proxy_stats[proxy_url]["errors"] += 1
+    finally:
+        await context.close()
+
+
+async def parse_black_gifts():
+    all_black_gifts = []
+    connector = aiohttp.TCPConnector(limit_per_host=15, force_close=True)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                '--disable-gpu',
+                '--disable-dev-shm-usage',
+                '--disable-setuid-sandbox',
+                '--no-sandbox',
+                '--disable-web-security',
+                '--disable-features=IsolateOrigins,site-per-process'
+            ]
+        )
+
+        async with aiohttp.ClientSession(connector=connector) as session:
+            semaphore = asyncio.Semaphore(10)
+            tasks = []
+            results = []
+
+            async def limited_worker(*args):
+                async with semaphore:
+                    await worker(*args)
+
+            for collection in COLLECTIONS:
+                task = asyncio.create_task(limited_worker(browser, collection, session, results))
+                tasks.append(task)
+
+            await asyncio.gather(*tasks)
+            all_black_gifts = results
+
+    print("\n📊 Статистика использования прокси:")
+    for proxy, stats in proxy_stats.items():
+        print(f"{proxy.split('@')[-1]}: Успешно {stats['success']}, Ошибок {stats['errors']}")
+
+    return all_black_gifts
+
+
+async def main():
+    print("🔄 Запуск асинхронного парсера...")
+    start_time = datetime.now()
+
+    gifts = await parse_black_gifts()
+
+    duration = datetime.now() - start_time
+    print(f"\n⏱ Время выполнения: {duration.total_seconds():.2f} сек")
+    print(f"⏱ Среднее время на коллекцию: {duration.total_seconds() / len(COLLECTIONS):.2f} сек")
+
+    if gifts:
+        print("\n🎉 Найдено подарков:", len(gifts))
+        for gift in gifts[:10]:
+            print(f"{gift['name']} | {gift['price']} | {gift['link']}")
+
+        telegram_text = "🎁 Найдены подарки:\n" + "\n".join(
+            f"{gift['name']} — {gift['price']}\n{gift['link']}" for gift in gifts[:5]
+        )
+        await send_telegram_message(telegram_text)
+
+        if len(gifts) > 10:
+            print(f"... и еще {len(gifts) - 10}")
+
+        with open("playwright_results.txt", "w", encoding="utf-8") as f:
+            for gift in gifts:
+                f.write(f"{gift['name']} | {gift['price']} | {gift['link']}\n")
+        print("\n💾 Результаты сохранены в playwright_results.txt")
+    else:
+        print("\n❌ Ничего не найдено")
+
+
+async def repeat_task():
+    while True:
+        print("🔄 Запускаем повторную задачу...")
+        try:
+            await main()  # Запуск основного кода
+        except Exception as e:
+            print(f"❌ Ошибка при выполнении задачи: {str(e)}")
+            await send_telegram_message(f"Ошибка при выполнении задачи: {str(e)}")
+
+        # Пауза перед следующим выполнением (например, через 1 час)
+        await asyncio.sleep(20)  # 3600 секунд = 1 час
+
+
+if __name__ == "__main__":
+    asyncio.run(repeat_task())
